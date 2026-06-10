@@ -11,15 +11,15 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # 🎯 CORE TECH ROLE KEYWORDS
-TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern"]
+TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
 
-# ⏱️ TECH-SPECIFIC EARLY CAREER MARKERS (Removed generic corporate tier names like 'associate' or 'executive')
+# ⏱️ TECH EARLY CAREER MARKERS
 EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "i", "-1", " 1", "university"]
 
 # 📍 STRICT GEOGRAPHIC HUB FILTER
 TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai"]
 
-# 🚫 HARD EXCLUSION BLOCKLIST (Added explicit sales, business, operations, and support roles)
+# 🚫 HARD EXCLUSION BLOCKLIST 
 EXCLUSION_BLOCKLIST = [
     "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts", "ii", "iii",
     "auditor", "audit", "content", "copy writer", "graphic", "designer", "video", "editor", 
@@ -41,10 +41,15 @@ DB_HEADERS = {
 }
 
 def check_jd_experience(ats_type, job_id, token_or_subdomain):
-    """Deep-scans the raw job description text from the source API to enforce 0-1 years of experience."""
+    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday."""
     text_to_scan = ""
     try:
-        if ats_type == "greenhouse":
+        if ats_type == "oracle":
+            # Oracle Cloud Candidate Experience API endpoint
+            url = f"https://{token_or_subdomain}.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings/{job_id}"
+            res = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
+            text_to_scan = (res.get("Title", "") + " " + res.get("ShortDescription", "") + " " + res.get("LongDescription", "")).lower()
+        elif ats_type == "greenhouse":
             clean_id = job_id.replace("gh-", "")
             url = f"https://boards-api.greenhouse.io/v1/boards/{token_or_subdomain}/jobs/{clean_id}"
             res = httpx.get(url, timeout=10).json()
@@ -60,12 +65,11 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain):
             res = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10).json()
             text_to_scan = res.get("jobDescription", "").lower()
     except Exception as e:
-        print(f"Failed to fetch JD description for deep scan {job_id}: {e}")
+        print(f"Failed to fetch JD description for {job_id}: {e}")
         return True 
 
     for pattern in EXPERIENCE_REGEX:
-        matches = re.findall(pattern, text_to_scan)
-        if matches:
+        if re.search(pattern, text_to_scan):
             print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match in description text.")
             return False
     return True
@@ -88,9 +92,7 @@ def send_telegram_alert(company, title, url, location):
 
 def is_already_processed(job_id):
     url = f"{SUPABASE_URL}/rest/v1/processed_jobs?job_id=eq.{job_id}&select=job_id"
-    try:
-        response = httpx.get(url, headers=DB_HEADERS)
-        return len(response.json()) > 0
+    try: return len(httpx.get(url, headers=DB_HEADERS).json()) > 0
     except: return False
 
 def save_job_to_db(job_id, company, title, job_url):
@@ -108,31 +110,42 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         location = job.get('location', 'India')
         location_lower = location.lower()
         
-        # 1. Broad Title Exclusions Check (Drop non-tech words instantly)
         if any(block in title_lower for block in EXCLUSION_BLOCKLIST):
             continue
             
-        # 2. Strict City Boundary Check
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
-            
-            # 3. INTERSECTION VALIDATION (Must be an explicit Tech Role core AND have an Early Career Marker)
             has_tech_core = any(tech in title_lower for tech in TECH_ROLES)
             has_early_marker = any(marker in title_lower for marker in EXPERIENCE_MARKERS)
             
-            # A title like "Account Executive" will now fail because it has no tech core word.
             if has_tech_core and has_early_marker:
                 if not is_already_processed(job_id):
-                    
                     wday_raw_path = job.get('raw_path', job_id)
                     scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
                     
-                    # 4. DEEP SCANDING STEP
                     if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain):
                         continue
                         
                     print(f"🔥 Validated Target Profile: {title} at {company_name} ({location})")
                     save_job_to_db(job_id, company_name, title, job_url)
                     send_telegram_alert(company_name, title, job_url, location)
+
+def fetch_oracle(subdomain, company_name):
+    """Hits the direct internal JSON endpoints running behind corporate Oracle Cloud installations."""
+    url = f"https://{subdomain}.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId=300000002344073" # Targets India geography filters dynamically
+    try:
+        res = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
+        jobs = []
+        for item in res.get('items', []):
+            locations_list = [loc.get('Name', '') for loc in item.get('JobLocations', [])]
+            locations_str = ", ".join(locations_list) if locations_list else "India"
+            jobs.append({
+                "id": f"or-{item['Id']}",
+                "title": item['Title'],
+                "url": f"https://{subdomain}.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/Honeywell/job/{item['Id']}",
+                "location": locations_str
+            })
+        process_matches(jobs, company_name, "oracle", subdomain)
+    except Exception as e: print(f"Oracle fetch failed for {company_name}: {e}")
 
 def fetch_greenhouse(subdomain, company_name):
     url = f"https://boards-api.greenhouse.io/v1/boards/{subdomain}/jobs"
@@ -173,4 +186,5 @@ if __name__ == "__main__":
             if target['ats_type'] == 'workday': fetch_workday(target['token_or_subdomain'], target['company_name'])
             elif target['ats_type'] == 'greenhouse': fetch_greenhouse(target['token_or_subdomain'], target['company_name'])
             elif target['ats_type'] == 'lever': fetch_lever(target['token_or_subdomain'], target['company_name'])
+            elif target['ats_type'] == 'oracle': fetch_oracle(target['token_or_subdomain'], target['company_name'])
     except Exception as e: print(f"DB Error: {e}")

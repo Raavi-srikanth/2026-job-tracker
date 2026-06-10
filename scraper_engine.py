@@ -10,28 +10,27 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 TECH ROLE CORE KEYWORDS
-TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer"]
+# 🎯 CORE TECH ROLE KEYWORDS
+TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern"]
 
-# ⏱️ EARLY CAREER MARKERS
+# ⏱️ TECH-SPECIFIC EARLY CAREER MARKERS (Removed generic corporate tier names like 'associate' or 'executive')
 EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "i", "-1", " 1", "university"]
 
 # 📍 STRICT GEOGRAPHIC HUB FILTER
 TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai"]
 
-# 🚫 HARD TITLE EXCLUSION BLOCKLIST 
+# 🚫 HARD EXCLUSION BLOCKLIST (Added explicit sales, business, operations, and support roles)
 EXCLUSION_BLOCKLIST = [
-    "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts",
+    "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts", "ii", "iii",
     "auditor", "audit", "content", "copy writer", "graphic", "designer", "video", "editor", 
     "hr", "talent acquisition", "recruiter", "benefits", "operations", "people", "marketing", "martech",
-    "ii", "iii"
+    "sales", "executive", "account", "alliances", "brand", "customer success", "cst", "support", "business development", "bde", "finance"
 ]
 
 # ⛔ REGEX PATTERNS TO DETECT EXPERIENCE IN JOB DESCRIPTIONS
-# This catches things like: "2+ years", "3-5 years", "requires 4 years", "minimum of 2 years experience"
 EXPERIENCE_REGEX = [
-    r"([1-9]|\d+)\s*\+?\s*years?", 
-    r"([1-9])\s*-\s*(\d+)\s*years?",
+    r"([2-9]|\d+)\s*\+?\s*years?", 
+    r"([2-9])\s*-\s*(\d+)\s*years?",
     r"experience\s*required"
 ]
 
@@ -42,46 +41,33 @@ DB_HEADERS = {
 }
 
 def check_jd_experience(ats_type, job_id, token_or_subdomain):
-    """Deep-scans the raw job description text from the source API to enforce 0 years of experience."""
+    """Deep-scans the raw job description text from the source API to enforce 0-1 years of experience."""
     text_to_scan = ""
-    
     try:
         if ats_type == "greenhouse":
-            # Greenhouse internal content API
             clean_id = job_id.replace("gh-", "")
             url = f"https://boards-api.greenhouse.io/v1/boards/{token_or_subdomain}/jobs/{clean_id}"
             res = httpx.get(url, timeout=10).json()
             text_to_scan = res.get("content", "").lower()
-            
         elif ats_type == "lever":
-            # Lever internal content API
             clean_id = job_id.replace("lev-", "")
             url = f"https://api.lever.co/v0/postings/{token_or_subdomain}/{clean_id}"
             res = httpx.get(url, timeout=10).json()
             text_to_scan = (res.get("description", "") + " " + res.get("lists", {}).get("requirements", "")).lower()
-            
         elif ats_type == "workday":
-            # Workday internal content detailed API
             url = f"https://{token_or_subdomain}.myworkdayjobs.com/wday/cxs/{token_or_subdomain}/Careers/jobDetails"
-            # Workday needs the direct external path string back to the server
             payload = {"externalPath": job_id}
             res = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10).json()
             text_to_scan = res.get("jobDescription", "").lower()
     except Exception as e:
         print(f"Failed to fetch JD description for deep scan {job_id}: {e}")
-        return True # Safer to skip if the description can't be fetched
+        return True 
 
-    # Look for explicit experience markers (like 2+ years, 3 years, etc.)
     for pattern in EXPERIENCE_REGEX:
         matches = re.findall(pattern, text_to_scan)
-        for match in matches:
-            # If a tuple is returned by regex, extract the numbers safely
-            years = int(match[0]) if isinstance(match, tuple) else int(match) if match.isdigit() else 99
-            # Allow 0 or 1 year configurations as fallback buffers for entry level tracks
-            if years >= 2:
-                print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match '{years} years' in description text.")
-                return False
-
+        if matches:
+            print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match in description text.")
+            return False
     return True
 
 def send_telegram_alert(company, title, url, location):
@@ -122,26 +108,26 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         location = job.get('location', 'India')
         location_lower = location.lower()
         
-        # 1. Broad Title Exclusions Check
+        # 1. Broad Title Exclusions Check (Drop non-tech words instantly)
         if any(block in title_lower for block in EXCLUSION_BLOCKLIST):
             continue
             
         # 2. Strict City Boundary Check
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
             
+            # 3. INTERSECTION VALIDATION (Must be an explicit Tech Role core AND have an Early Career Marker)
             has_tech_core = any(tech in title_lower for tech in TECH_ROLES)
             has_early_marker = any(marker in title_lower for marker in EXPERIENCE_MARKERS)
             
-            if has_tech_core or has_early_marker:
+            # A title like "Account Executive" will now fail because it has no tech core word.
+            if has_tech_core and has_early_marker:
                 if not is_already_processed(job_id):
                     
-                    # 3. DEEP SCANDING STEP: Open up the JD backend structure and audit for hidden experience requirements
-                    # For Workday, we need to pass the raw path string down to the post request payload
                     wday_raw_path = job.get('raw_path', job_id)
                     scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
                     
+                    # 4. DEEP SCANDING STEP
                     if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain):
-                        # Blocked by the deep description scanner logic loop!
                         continue
                         
                     print(f"🔥 Validated Target Profile: {title} at {company_name} ({location})")

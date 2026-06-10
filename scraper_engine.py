@@ -9,19 +9,21 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 NEW TARGET ROLE KEYWORDS (Combines graduation batches, fresh roles, and early-career titles)
-KEYWORDS = [
-    "2026", "graduate", "trainee", "associate", "fresher", "entry level", 
-    "ai engineer", "ml engineer", "machine learning", "artificial intelligence",
-    "data scientist", "data analyst", "sde i", "sde-1", "software engineer i", 
-    "software engineer-1", "intern", "internship"
-]
+# 🎯 PRECISION TECH DOMAIN KEYWORDS
+TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer"]
 
-# 📍 STRICT GEOGRAPHIC FILTER (Only alerts if the job is physically in these three tech hubs)
+# ⏱️ EARLY CAREER / BATCH MARKERS 
+EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "i", "-1", " 1"]
+
+# 📍 STRICT GEOGRAPHIC HUB FILTER
 TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai"]
 
-# 🚫 EXCLUSION BLOCKLIST (Instantly drops senior profiles containing target words)
-EXCLUSION_BLOCKLIST = ["senior", "sr.", "lead", "principal", "manager", "director", "architect", "years experience", "experience required"]
+# 🚫 HARD EXCLUSION BLOCKLIST (Instantly wipes non-tech and senior roles)
+EXCLUSION_BLOCKLIST = [
+    "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff",
+    "auditor", "audit", "content", "copy writer", "graphic", "designer", "video", "editor", 
+    "hr", "talent acquisition", "recruiter", "benefits", "operations", "people", "marketing", "martech"
+]
 
 DB_HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -30,9 +32,8 @@ DB_HEADERS = {
 }
 
 def send_telegram_alert(company, title, url, location):
-    """Drops a custom dashboard alert right into your private Telegram channel."""
     message = (
-        f"🎯 *NEW 2026 / INTERN ROLE DETECTED*\n"
+        f"🎯 *NEW 2026 / INTERN TECH ROLE DETECTED*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *Company:* {company}\n"
         f"💼 *Role:* {title}\n"
@@ -43,10 +44,8 @@ def send_telegram_alert(company, title, url, location):
     )
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
-    try:
-        httpx.post(telegram_url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    try: httpx.post(telegram_url, json=payload, timeout=10)
+    except Exception as e: print(f"Telegram error: {e}")
 
 def is_already_processed(job_id):
     url = f"{SUPABASE_URL}/rest/v1/processed_jobs?job_id=eq.{job_id}&select=job_id"
@@ -70,16 +69,21 @@ def process_matches(found_jobs, company_name):
         location = job.get('location', 'India')
         location_lower = location.lower()
         
-        # 1. Antiduplication & Seniority Safeguard (Drop experienced profiles instantly)
+        # 1. Broad Exclusions Check (Kill senior and non-tech tracks instantly)
         if any(block in title_lower for block in EXCLUSION_BLOCKLIST):
             continue
             
-        # 2. Match Target Role or Target Batch
-        if any(kw in title_lower for kw in KEYWORDS):
-            # 3. Restrict Strictly to Bengaluru, Hyderabad, and Chennai
-            if any(loc in location_lower for loc in TARGET_LOCATIONS):
+        # 2. Strict City Boundary Check
+        if any(loc in location_lower for loc in TARGET_LOCATIONS):
+            
+            # 3. INTERSECT MATCHING: Title must have a TECH core AND an ELIGIBILITY marker
+            has_tech_core = any(tech in title_lower for tech in TECH_ROLES)
+            has_early_marker = any(marker in title_lower for marker in EXPERIENCE_MARKERS)
+            
+            # Special bypass for highly explicit target profiles (e.g. "Data Scientist Intern")
+            if has_tech_core and has_early_marker:
                 if not is_already_processed(job_id):
-                    print(f"🔥 Validating Target Profile: {title} at {company_name} ({location})")
+                    print(f"🔥 Validated Target Profile: {title} at {company_name} ({location})")
                     save_job_to_db(job_id, company_name, title, job_url)
                     send_telegram_alert(company_name, title, job_url, location)
 
@@ -101,7 +105,6 @@ def fetch_lever(token, company_name):
 
 def fetch_workday(subdomain, company_name):
     url = f"https://{subdomain}.myworkdayjobs.com/wday/cxs/{subdomain}/Careers/jobs"
-    # Pre-filtered payload at the country level for India
     payload = {"appliedFacets": {"locationCountry": ["bc33aa3152ec42d4995f4791a106ed09"]}, "limit": 20, "offset": 0, "searchText": ""}
     try:
         res = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15).json()

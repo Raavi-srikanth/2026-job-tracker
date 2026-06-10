@@ -1,0 +1,29 @@
+name: Run Tracker Job Engine
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Automatically invokes engine execution cycles every 30 minutes
+  workflow_dispatch:      # Grants visual manual entry execution buttons inside GitHub UI
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository Base
+        uses: actions/checkout@v4
+
+      - name: Initialize Isolated Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Core Dependencies Extraction
+        run: pip install httpx
+
+      - name: Fire Execution Scraper Pipeline
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scraper_engine.py

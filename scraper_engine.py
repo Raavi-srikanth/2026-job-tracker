@@ -4,6 +4,7 @@ import json
 import httpx
 import re
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -11,6 +12,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
+DEFAULT_ORACLE_SITE_NAME = "CX_1"
+INDIA_LOCATION_ID = "300000002344073"
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -42,29 +45,110 @@ DB_HEADERS = {
     "Content-Type": "application/json"
 }
 
-def check_jd_experience(ats_type, job_id, token_or_subdomain):
-    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday."""
+def parse_json_or_raise(response, context):
+    try:
+        return response.json()
+    except json.JSONDecodeError as e:
+        content_type = response.headers.get("content-type", "unknown")
+        body_size = len(response.content or b"")
+        raise ValueError(
+            f"{context} returned non-JSON response "
+            f"(status={response.status_code}, content_type={content_type}, body_bytes={body_size})"
+        ) from e
+
+def normalize_token(value):
+    return str(value or "").strip().rstrip("/")
+
+def build_oracle_host(token_or_subdomain):
+    token = normalize_token(token_or_subdomain)
+    if not token:
+        raise ValueError("Missing Oracle token_or_subdomain")
+    parsed = urlparse(token if "://" in token else f"https://{token}")
+    host = (parsed.netloc or "").strip() or token.split("/")[0]
+    if not host:
+        raise ValueError(f"Invalid Oracle token_or_subdomain: {token_or_subdomain}")
+    if "oraclecloud.com" not in host:
+        host = f"{host}.fa.ocs.oraclecloud.com"
+    return host
+
+def build_or_extract_oracle_job_url(oracle_host, job_item):
+    job_id = job_item.get("Id")
+    if not job_id:
+        raise ValueError("Oracle job item is missing Id")
+    for key in ("ExternalURL", "ExternalUrl", "ApplyURL", "ApplyUrl", "JobURL", "JobUrl"):
+        value = job_item.get(key)
+        if isinstance(value, str) and value.startswith("http"):
+            return value
+    site_name_value = job_item.get("SiteName")
+    site_name = site_name_value if isinstance(site_name_value, str) else DEFAULT_ORACLE_SITE_NAME
+    return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_id}"
+
+def build_workday_endpoints(token_or_subdomain):
+    token = normalize_token(token_or_subdomain)
+    if not token:
+        raise ValueError("Missing Workday token_or_subdomain")
+    parsed = urlparse(token if "://" in token else f"https://{token}")
+    host = (parsed.hostname or "").strip()
+    path_parts = [p for p in parsed.path.split("/") if p]
+
+    if "cxs" in path_parts:
+        cxs_idx = path_parts.index("cxs")
+        if len(path_parts) <= cxs_idx + 2:
+            raise ValueError(
+                f"Invalid Workday cxs path: {parsed.path}. "
+                f"Expected format like /wday/cxs/<tenant>/<site>/..."
+            )
+        tenant = path_parts[cxs_idx + 1]
+        site = path_parts[cxs_idx + 2]
+    else:
+        tenant = host.split(".")[0] if host else token.split("/")[0]
+        site = tenant
+
+    if not tenant or not site:
+        raise ValueError(f"Invalid Workday token_or_subdomain: {token_or_subdomain}")
+
+    if not host or "myworkdayjobs.com" not in host:
+        host = f"{tenant}.myworkdayjobs.com"
+
+    base = f"https://{host}/wday/cxs/{tenant}/{site}"
+    return {
+        "jobs_url": f"{base}/jobs",
+        "job_details_url": f"{base}/jobDetails",
+        "public_base_url": f"https://{host}"
+    }
+
+def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
+    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday.
+    detail_url_override is used for Workday when a precomputed jobDetails endpoint is available.
+    """
     text_to_scan = ""
     try:
         if ats_type == "oracle":
             # Oracle Cloud Candidate Experience API endpoint
-            url = f"https://{token_or_subdomain}.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings/{job_id}"
-            res = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
+            oracle_host = build_oracle_host(token_or_subdomain)
+            url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings/{job_id}"
+            response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            res = parse_json_or_raise(response, f"Oracle JD fetch for {job_id}")
             text_to_scan = (res.get("Title", "") + " " + res.get("ShortDescription", "") + " " + res.get("LongDescription", "")).lower()
         elif ats_type == "greenhouse":
             clean_id = job_id.replace("gh-", "")
             url = f"https://boards-api.greenhouse.io/v1/boards/{token_or_subdomain}/jobs/{clean_id}"
-            res = httpx.get(url, timeout=10).json()
+            response = httpx.get(url, timeout=10)
+            res = parse_json_or_raise(response, f"Greenhouse JD fetch for {job_id}")
             text_to_scan = res.get("content", "").lower()
         elif ats_type == "lever":
             clean_id = job_id.replace("lev-", "")
             url = f"https://api.lever.co/v0/postings/{token_or_subdomain}/{clean_id}"
-            res = httpx.get(url, timeout=10).json()
-            text_to_scan = (res.get("description", "") + " " + res.get("lists", {}).get("requirements", "")).lower()
+            response = httpx.get(url, timeout=10)
+            res = parse_json_or_raise(response, f"Lever JD fetch for {job_id}")
+            lists = res.get("lists", {})
+            requirements = lists.get("requirements", "") if isinstance(lists, dict) else ""
+            text_to_scan = (res.get("description", "") + " " + requirements).lower()
         elif ats_type == "workday":
-            url = f"https://{token_or_subdomain}.myworkdayjobs.com/wday/cxs/{token_or_subdomain}/Careers/jobDetails"
+            url = detail_url_override or build_workday_endpoints(token_or_subdomain)["job_details_url"]
             payload = {"externalPath": job_id}
-            res = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10).json()
+            response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10)
+            res = parse_json_or_raise(response, f"Workday JD fetch for {job_id}")
             text_to_scan = res.get("jobDescription", "").lower()
     except Exception as e:
         print(f"Failed to fetch JD description for {job_id}: {e}")
@@ -219,8 +303,9 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
                 if not is_already_processed(job_id):
                     wday_raw_path = job.get('raw_path', job_id)
                     scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
+                    detail_url_override = job.get('detail_url')
                     
-                    if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain):
+                    if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, detail_url_override=detail_url_override):
                         continue
                         
                     print(f"🔥 Validated Target Profile: {title} at {company_name} ({location})")
@@ -231,17 +316,25 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
 
 def fetch_oracle(subdomain, company_name):
     """Hits the direct internal JSON endpoints running behind corporate Oracle Cloud installations."""
-    url = f"https://{subdomain}.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId=300000002344073" # Targets India geography filters dynamically
+    oracle_host = build_oracle_host(subdomain)
+    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId={INDIA_LOCATION_ID}" # Static India location filter
     try:
-        res = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
+        response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
+        if not isinstance(res, dict):
+            raise ValueError(f"Oracle jobs fetch returned unexpected type: {type(res).__name__}")
         jobs = []
         for item in res.get('items', []):
+            if not isinstance(item, dict):
+                continue
+            if not item.get("Id") or not item.get("Title"):
+                continue
             locations_list = [loc.get('Name', '') for loc in item.get('JobLocations', [])]
             locations_str = ", ".join(locations_list) if locations_list else "India"
             jobs.append({
                 "id": f"or-{item['Id']}",
                 "title": item['Title'],
-                "url": f"https://{subdomain}.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/Honeywell/job/{item['Id']}",
+                "url": build_or_extract_oracle_job_url(oracle_host, item),
                 "location": locations_str
             })
         new_jobs = process_matches(jobs, company_name, "oracle", subdomain)
@@ -254,8 +347,20 @@ def fetch_oracle(subdomain, company_name):
 def fetch_greenhouse(subdomain, company_name):
     url = f"https://boards-api.greenhouse.io/v1/boards/{subdomain}/jobs"
     try:
-        res = httpx.get(url, timeout=15).json()
-        jobs = [{"id": f"gh-{j['id']}", "title": j['title'], "url": j['absolute_url'], "location": j.get('location', {}).get('name', 'India')} for j in res.get('jobs', [])]
+        response = httpx.get(url, timeout=15)
+        res = parse_json_or_raise(response, f"Greenhouse jobs fetch for {company_name}")
+        if not isinstance(res, dict):
+            raise ValueError(f"Greenhouse jobs fetch returned unexpected type: {type(res).__name__}")
+        jobs = []
+        for j in res.get('jobs', []):
+            if not isinstance(j, dict) or not j.get("id") or not j.get("title") or not j.get("absolute_url"):
+                continue
+            jobs.append({
+                "id": f"gh-{j['id']}",
+                "title": j['title'],
+                "url": j['absolute_url'],
+                "location": j.get('location', {}).get('name', 'India') if isinstance(j.get('location'), dict) else 'India'
+            })
         new_jobs = process_matches(jobs, company_name, "greenhouse", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
@@ -266,8 +371,20 @@ def fetch_greenhouse(subdomain, company_name):
 def fetch_lever(token, company_name):
     url = f"https://api.lever.co/v0/postings/{token}?mode=json"
     try:
-        res = httpx.get(url, timeout=15).json()
-        jobs = [{"id": f"lev-{j['id']}", "title": j['text'], "url": j['hostedUrl'], "location": j.get('categories', {}).get('location', 'India')} for j in res]
+        response = httpx.get(url, timeout=15)
+        res = parse_json_or_raise(response, f"Lever jobs fetch for {company_name}")
+        if not isinstance(res, list):
+            raise ValueError(f"Lever jobs fetch returned unexpected type: {type(res).__name__}")
+        jobs = []
+        for j in res:
+            if not isinstance(j, dict) or not j.get("id") or not j.get("text") or not j.get("hostedUrl"):
+                continue
+            jobs.append({
+                "id": f"lev-{j['id']}",
+                "title": j['text'],
+                "url": j['hostedUrl'],
+                "location": j.get('categories', {}).get('location', 'India') if isinstance(j.get('categories'), dict) else 'India'
+            })
         new_jobs = process_matches(jobs, company_name, "lever", token)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
@@ -276,17 +393,33 @@ def fetch_lever(token, company_name):
         return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
 
 def fetch_workday(subdomain, company_name):
-    url = f"https://{subdomain}.myworkdayjobs.com/wday/cxs/{subdomain}/Careers/jobs"
+    endpoints = build_workday_endpoints(subdomain)
+    url = endpoints["jobs_url"]
     payload = {"appliedFacets": {"locationCountry": ["bc33aa3152ec42d4995f4791a106ed09"]}, "limit": 20, "offset": 0, "searchText": ""}
     try:
-        res = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15).json()
-        jobs = [{
-            "id": f"wd-{j['jobPostingId']}",
-            "raw_path": j['externalPath'],
-            "title": j['title'],
-            "url": f"https://{subdomain}.myworkdayjobs.com" + j['externalPath'],
-            "location": j.get('locationsText', 'India')
-        } for j in res.get('jobPostings', [])]
+        response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15)
+        res = parse_json_or_raise(response, f"Workday jobs fetch for {company_name}")
+        if not isinstance(res, dict):
+            raise ValueError(f"Workday jobs fetch returned unexpected type: {type(res).__name__}")
+        jobs = []
+        for j in res.get('jobPostings', []):
+            if not isinstance(j, dict):
+                continue
+            external_path = j.get('externalPath', '')
+            if isinstance(external_path, str) and external_path.startswith("http"):
+                job_url = external_path
+            else:
+                job_url = f"{endpoints['public_base_url']}{external_path}"
+            if not j.get("jobPostingId") or not j.get("title") or not job_url:
+                continue
+            jobs.append({
+                "id": f"wd-{j['jobPostingId']}",
+                "raw_path": external_path,
+                "title": j['title'],
+                "url": job_url,
+                "location": j.get('locationsText', 'India'),
+                "detail_url": endpoints["job_details_url"]
+            })
         new_jobs = process_matches(jobs, company_name, "workday", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:

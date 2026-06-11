@@ -12,6 +12,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
+BODY_PREVIEW_MAX_LENGTH = 120
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -47,7 +48,7 @@ def parse_json_or_raise(response, context):
     try:
         return response.json()
     except json.JSONDecodeError as e:
-        body_preview = response.text[:120].replace("\n", " ")
+        body_preview = response.text[:BODY_PREVIEW_MAX_LENGTH].replace("\n", " ")
         raise ValueError(f"{context} returned non-JSON response (status={response.status_code}, body={body_preview!r})") from e
 
 def normalize_token(value):
@@ -81,6 +82,9 @@ def build_workday_endpoints(token_or_subdomain):
         tenant = host.split(".")[0] if host else token.split("/")[0]
         site = tenant
 
+    if not tenant or not site:
+        raise ValueError(f"Invalid Workday token_or_subdomain: {token_or_subdomain}")
+
     if not host or "myworkdayjobs.com" not in host:
         host = f"{tenant}.myworkdayjobs.com"
 
@@ -92,7 +96,9 @@ def build_workday_endpoints(token_or_subdomain):
     }
 
 def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
-    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday."""
+    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday.
+    detail_url_override is used for Workday when a precomputed jobDetails endpoint is available.
+    """
     text_to_scan = ""
     try:
         if ats_type == "oracle":
@@ -113,10 +119,8 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
             url = f"https://api.lever.co/v0/postings/{token_or_subdomain}/{clean_id}"
             response = httpx.get(url, timeout=10)
             res = parse_json_or_raise(response, f"Lever JD fetch for {job_id}")
-            requirements = ""
             lists = res.get("lists", {})
-            if isinstance(lists, dict):
-                requirements = lists.get("requirements", "")
+            requirements = lists.get("requirements", "") if isinstance(lists, dict) else ""
             text_to_scan = (res.get("description", "") + " " + requirements).lower()
         elif ats_type == "workday":
             url = detail_url_override or build_workday_endpoints(token_or_subdomain)["job_details_url"]
@@ -325,13 +329,16 @@ def fetch_greenhouse(subdomain, company_name):
         res = parse_json_or_raise(response, f"Greenhouse jobs fetch for {company_name}")
         if not isinstance(res, dict):
             raise ValueError(f"Greenhouse jobs fetch returned unexpected type: {type(res).__name__}")
-        jobs = [{
-            "id": f"gh-{j.get('id')}",
-            "title": j.get('title'),
-            "url": j.get('absolute_url'),
-            "location": j.get('location', {}).get('name', 'India')
-        } for j in res.get('jobs', []) if isinstance(j, dict)]
-        jobs = [job for job in jobs if job.get("id") and not job["id"].endswith("None") and job.get("title") and job.get("url")]
+        jobs = []
+        for j in res.get('jobs', []):
+            if not isinstance(j, dict) or not j.get("id") or not j.get("title") or not j.get("absolute_url"):
+                continue
+            jobs.append({
+                "id": f"gh-{j['id']}",
+                "title": j['title'],
+                "url": j['absolute_url'],
+                "location": j.get('location', {}).get('name', 'India')
+            })
         new_jobs = process_matches(jobs, company_name, "greenhouse", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
@@ -346,13 +353,16 @@ def fetch_lever(token, company_name):
         res = parse_json_or_raise(response, f"Lever jobs fetch for {company_name}")
         if not isinstance(res, list):
             raise ValueError(f"Lever jobs fetch returned unexpected type: {type(res).__name__}")
-        jobs = [{
-            "id": f"lev-{j.get('id')}",
-            "title": j.get('text'),
-            "url": j.get('hostedUrl'),
-            "location": j.get('categories', {}).get('location', 'India')
-        } for j in res if isinstance(j, dict)]
-        jobs = [job for job in jobs if job.get("id") and not job["id"].endswith("None") and job.get("title") and job.get("url")]
+        jobs = []
+        for j in res:
+            if not isinstance(j, dict) or not j.get("id") or not j.get("text") or not j.get("hostedUrl"):
+                continue
+            jobs.append({
+                "id": f"lev-{j['id']}",
+                "title": j['text'],
+                "url": j['hostedUrl'],
+                "location": j.get('categories', {}).get('location', 'India')
+            })
         new_jobs = process_matches(jobs, company_name, "lever", token)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:

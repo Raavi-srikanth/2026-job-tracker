@@ -13,6 +13,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
 DEFAULT_ORACLE_SITE_NAME = "CX_1"
+INDIA_LOCATION_ID = "300000002344073"
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -75,7 +76,8 @@ def build_or_extract_oracle_job_url(oracle_host, job_item):
         value = job_item.get(key)
         if isinstance(value, str) and value.startswith("http"):
             return value
-    site_name = job_item.get("SiteName") if isinstance(job_item.get("SiteName"), str) else DEFAULT_ORACLE_SITE_NAME
+    site_name_value = job_item.get("SiteName")
+    site_name = site_name_value if isinstance(site_name_value, str) else DEFAULT_ORACLE_SITE_NAME
     return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_item['Id']}"
 
 def build_workday_endpoints(token_or_subdomain):
@@ -312,7 +314,7 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
 def fetch_oracle(subdomain, company_name):
     """Hits the direct internal JSON endpoints running behind corporate Oracle Cloud installations."""
     oracle_host = build_oracle_host(subdomain)
-    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId=300000002344073" # Static India location filter
+    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId={INDIA_LOCATION_ID}" # Static India location filter
     try:
         response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
@@ -354,7 +356,7 @@ def fetch_greenhouse(subdomain, company_name):
                 "id": f"gh-{j['id']}",
                 "title": j['title'],
                 "url": j['absolute_url'],
-                "location": j.get('location', {}).get('name', 'India')
+                "location": j.get('location', {}).get('name', 'India') if isinstance(j.get('location'), dict) else 'India'
             })
         new_jobs = process_matches(jobs, company_name, "greenhouse", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
@@ -378,7 +380,7 @@ def fetch_lever(token, company_name):
                 "id": f"lev-{j['id']}",
                 "title": j['text'],
                 "url": j['hostedUrl'],
-                "location": j.get('categories', {}).get('location', 'India')
+                "location": j.get('categories', {}).get('location', 'India') if isinstance(j.get('categories'), dict) else 'India'
             })
         new_jobs = process_matches(jobs, company_name, "lever", token)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}

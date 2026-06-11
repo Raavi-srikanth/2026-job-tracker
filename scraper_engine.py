@@ -60,9 +60,19 @@ def build_oracle_host(token_or_subdomain):
         raise ValueError("Missing Oracle token_or_subdomain")
     parsed = urlparse(token if "://" in token else f"https://{token}")
     host = (parsed.netloc or "").strip() or token.split("/")[0]
+    if not host:
+        raise ValueError(f"Invalid Oracle token_or_subdomain: {token_or_subdomain}")
     if "oraclecloud.com" not in host:
         host = f"{host}.fa.ocs.oraclecloud.com"
     return host
+
+def get_oracle_job_url(oracle_host, job_item):
+    for key in ("ExternalURL", "ExternalUrl", "ApplyURL", "ApplyUrl", "JobURL", "JobUrl"):
+        value = job_item.get(key)
+        if isinstance(value, str) and value.startswith("http"):
+            return value
+    site_name = job_item.get("SiteName") if isinstance(job_item.get("SiteName"), str) else "CX_1"
+    return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_item['Id']}"
 
 def build_workday_endpoints(token_or_subdomain):
     token = normalize_token(token_or_subdomain)
@@ -312,7 +322,7 @@ def fetch_oracle(subdomain, company_name):
             jobs.append({
                 "id": f"or-{item['Id']}",
                 "title": item['Title'],
-                "url": f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/Honeywell/job/{item['Id']}",
+                "url": get_oracle_job_url(oracle_host, item),
                 "location": locations_str
             })
         new_jobs = process_matches(jobs, company_name, "oracle", subdomain)

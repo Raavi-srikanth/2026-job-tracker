@@ -12,7 +12,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
-BODY_PREVIEW_MAX_LENGTH = 120
+DEFAULT_ORACLE_SITE_NAME = "CX_1"
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -48,8 +48,12 @@ def parse_json_or_raise(response, context):
     try:
         return response.json()
     except json.JSONDecodeError as e:
-        body_preview = response.text[:BODY_PREVIEW_MAX_LENGTH].replace("\n", " ")
-        raise ValueError(f"{context} returned non-JSON response (status={response.status_code}, body={body_preview!r})") from e
+        content_type = response.headers.get("content-type", "unknown")
+        body_size = len(response.content or b"")
+        raise ValueError(
+            f"{context} returned non-JSON response "
+            f"(status={response.status_code}, content_type={content_type}, body_bytes={body_size})"
+        ) from e
 
 def normalize_token(value):
     return str(value or "").strip().rstrip("/")
@@ -66,12 +70,12 @@ def build_oracle_host(token_or_subdomain):
         host = f"{host}.fa.ocs.oraclecloud.com"
     return host
 
-def get_oracle_job_url(oracle_host, job_item):
+def build_or_extract_oracle_job_url(oracle_host, job_item):
     for key in ("ExternalURL", "ExternalUrl", "ApplyURL", "ApplyUrl", "JobURL", "JobUrl"):
         value = job_item.get(key)
         if isinstance(value, str) and value.startswith("http"):
             return value
-    site_name = job_item.get("SiteName") if isinstance(job_item.get("SiteName"), str) else "CX_1"
+    site_name = job_item.get("SiteName") if isinstance(job_item.get("SiteName"), str) else DEFAULT_ORACLE_SITE_NAME
     return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_item['Id']}"
 
 def build_workday_endpoints(token_or_subdomain):
@@ -85,7 +89,10 @@ def build_workday_endpoints(token_or_subdomain):
     if "cxs" in path_parts:
         cxs_idx = path_parts.index("cxs")
         if len(path_parts) <= cxs_idx + 2:
-            raise ValueError(f"Invalid Workday cxs path: {parsed.path}")
+            raise ValueError(
+                f"Invalid Workday cxs path: {parsed.path}. "
+                f"Expected format like /wday/cxs/<tenant>/<site>/..."
+            )
         tenant = path_parts[cxs_idx + 1]
         site = path_parts[cxs_idx + 2]
     else:
@@ -305,7 +312,7 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
 def fetch_oracle(subdomain, company_name):
     """Hits the direct internal JSON endpoints running behind corporate Oracle Cloud installations."""
     oracle_host = build_oracle_host(subdomain)
-    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId=300000002344073" # Targets India geography filters dynamically
+    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId=300000002344073" # Static India location filter
     try:
         response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
@@ -322,7 +329,7 @@ def fetch_oracle(subdomain, company_name):
             jobs.append({
                 "id": f"or-{item['Id']}",
                 "title": item['Title'],
-                "url": get_oracle_job_url(oracle_host, item),
+                "url": build_or_extract_oracle_job_url(oracle_host, item),
                 "location": locations_str
             })
         new_jobs = process_matches(jobs, company_name, "oracle", subdomain)

@@ -86,7 +86,7 @@ def send_telegram_message(message, markdown=True):
         payload["parse_mode"] = "Markdown"
     try:
         httpx.post(telegram_url, json=payload, timeout=10)
-    except Exception as e: print(f"Telegram error: {e}")
+    except Exception as e: print(f"Telegram error (len={len(message)}): {e}")
 
 def send_telegram_alert(company, title, url, location):
     message = (
@@ -127,7 +127,7 @@ def log_scan_run(company_name, ats_type, jobs_fetched, new_jobs, success, error_
     try:
         httpx.post(url, json=payload, headers=DB_HEADERS, timeout=10)
     except Exception as e:
-        log_error = f"Scan run logging failed for {company_name}: {e}"
+        log_error = f"Scan run logging failed for {company_name} (POST {url}): {e}"
         print(log_error)
         send_telegram_message(f"⚠️ {log_error}", markdown=False)
 
@@ -189,7 +189,10 @@ def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, fa
     send_telegram_message(summary, markdown=True)
     if successful_scans == 0:
         send_telegram_message(
-            "🚨 *Heartbeat Alert*\nNo company scans succeeded in this run. Please investigate workflow/runtime health.",
+            f"🚨 *Heartbeat Alert*\n"
+            f"No company scans succeeded in this run.\n"
+            f"Attempts: {total_companies}, Failures: {failed_count}\n"
+            f"Please investigate workflow/runtime health immediately.",
             markdown=True
         )
 
@@ -310,7 +313,12 @@ if __name__ == "__main__":
             elif target['ats_type'] == 'oracle':
                 result = fetch_oracle(target['token_or_subdomain'], target['company_name'])
             else:
-                result = {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": f"Unsupported ATS type: {target['ats_type']}"}
+                result = {
+                    "success": False,
+                    "jobs_fetched": 0,
+                    "new_jobs": 0,
+                    "error": f"Unsupported ATS type: {target['ats_type']} (supported: workday, greenhouse, lever, oracle)"
+                }
             finished_at = datetime.now(timezone.utc)
 
             log_scan_run(

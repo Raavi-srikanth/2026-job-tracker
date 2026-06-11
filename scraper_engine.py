@@ -127,7 +127,9 @@ def log_scan_run(company_name, ats_type, jobs_fetched, new_jobs, success, error_
     try:
         httpx.post(url, json=payload, headers=DB_HEADERS, timeout=10)
     except Exception as e:
-        print(f"Scan run logging failed for {company_name}: {e}")
+        log_error = f"Scan run logging failed for {company_name}: {e}"
+        print(log_error)
+        send_telegram_message(f"⚠️ {log_error}", markdown=False)
 
 def parse_iso_datetime(value):
     if not value:
@@ -156,10 +158,12 @@ def check_stale_scans(companies, stale_hours):
                 stale_companies.append(f"{company['company_name']} (no successful scan)")
                 continue
             latest_scan = parse_iso_datetime(response[0].get("finished_at"))
-            if not latest_scan or (now_utc - latest_scan) > timedelta(hours=stale_hours):
+            if latest_scan is None:
+                stale_companies.append(f"{company['company_name']} (invalid finished_at format)")
+            elif (now_utc - latest_scan) > timedelta(hours=stale_hours):
                 stale_companies.append(f"{company['company_name']} (stale)")
         except Exception as e:
-            stale_companies.append(f"{company['company_name']} (check failed: {e})")
+            stale_companies.append(f"{company['company_name']} (check failed: {type(e).__name__}: {e})")
     if stale_companies:
         stale_lines = "\n".join([f"- {entry}" for entry in stale_companies])
         send_telegram_message(

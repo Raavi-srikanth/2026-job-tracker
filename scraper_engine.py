@@ -72,13 +72,16 @@ def build_oracle_host(token_or_subdomain):
     return host
 
 def build_or_extract_oracle_job_url(oracle_host, job_item):
+    job_id = job_item.get("Id")
+    if not job_id:
+        raise ValueError("Oracle job item is missing Id")
     for key in ("ExternalURL", "ExternalUrl", "ApplyURL", "ApplyUrl", "JobURL", "JobUrl"):
         value = job_item.get(key)
         if isinstance(value, str) and value.startswith("http"):
             return value
     site_name_value = job_item.get("SiteName")
     site_name = site_name_value if isinstance(site_name_value, str) else DEFAULT_ORACLE_SITE_NAME
-    return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_item['Id']}"
+    return f"https://{oracle_host}/hcmUI/CandidateExperience/en/sites/{site_name}/job/{job_id}"
 
 def build_workday_endpoints(token_or_subdomain):
     token = normalize_token(token_or_subdomain)

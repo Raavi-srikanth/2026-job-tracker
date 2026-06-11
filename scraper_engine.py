@@ -10,6 +10,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
+SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -86,7 +87,8 @@ def send_telegram_message(message, markdown=True):
         payload["parse_mode"] = "Markdown"
     try:
         httpx.post(telegram_url, json=payload, timeout=10)
-    except Exception as e: print(f"Telegram error (len={len(message)}): {e}")
+    except Exception as e:
+        print(f"Telegram error (len={len(message)}): {e}")
 
 def send_telegram_alert(company, title, url, location):
     message = (
@@ -163,7 +165,7 @@ def check_stale_scans(companies, stale_hours):
             elif (now_utc - latest_scan) > timedelta(hours=stale_hours):
                 stale_companies.append(f"{company['company_name']} (stale)")
         except Exception as e:
-            stale_companies.append(f"{company['company_name']} (check failed: {type(e).__name__}: {e})")
+            stale_companies.append(f"{company['company_name']} (error checking scan status: {e})")
     if stale_companies:
         stale_lines = "\n".join([f"- {entry}" for entry in stale_companies])
         send_telegram_message(
@@ -317,7 +319,7 @@ if __name__ == "__main__":
                     "success": False,
                     "jobs_fetched": 0,
                     "new_jobs": 0,
-                    "error": f"Unsupported ATS type: {target['ats_type']} (supported: workday, greenhouse, lever, oracle)"
+                    "error": f"Unsupported ATS type: {target['ats_type']} (supported: {', '.join(SUPPORTED_ATS_TYPES)})"
                 }
             finished_at = datetime.now(timezone.utc)
 

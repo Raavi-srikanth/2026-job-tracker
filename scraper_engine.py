@@ -26,7 +26,7 @@ TECH_ROLES = [
 EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "university", "junior", "associate"]
 
 # 📍 BROADENED GEOGRAPHIC HUB FILTER
-TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote"]
+TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote-india"]
 
 # 🚫 REFACTORED EXCLUSION BLOCKLIST (Blocks senior tiers, global regions, and explicit product levels)
 EXCLUSION_BLOCKLIST = [
@@ -54,6 +54,9 @@ DB_HEADERS = {
     "Content-Type": "application/json"
 }
 
+# This state tracking dictionary will be populated dynamically at runtime
+COMPANY_STATUS_REGISTRY = {}
+
 def verify_network_health():
     """Circuit breaker checking if baseline platforms resolve cleanly to prevent local caching drops."""
     test_domains = ["boards-api.greenhouse.io", "api.lever.co"]
@@ -64,16 +67,6 @@ def verify_network_health():
             print(f"🚨 Network Check Failed: Cannot resolve baseline domain {domain}")
             return False
     return True
-
-def has_company_ever_been_scanned(company_name):
-    """Checks if this specific company has any history inside your deduplication registry."""
-    url = f"{SUPABASE_URL}/rest/v1/processed_jobs?company_name=eq.{company_name}&select=job_id&limit=1"
-    try:
-        response = httpx.get(url, headers=DB_HEADERS, timeout=10)
-        return len(response.json()) > 0
-    except Exception as e:
-        print(f"⚠️ Error loading company history state for {company_name}: {e}")
-        return True # Default to True on failure to safely prevent alert floods
 
 def parse_json_or_raise(response, context):
     try:
@@ -222,7 +215,7 @@ def send_telegram_message(message, markdown=True):
 
 def send_telegram_alert(company, title, url, location):
     message = (
-        f"🎯 *MATCHED TRACK PROFILE ENGAGED*\n"
+        f"🎯 *MATCHED TRACK PROFILE DETECTED*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *Company:* {company}\n"
         f"💼 *Role:* {title}\n"
@@ -332,10 +325,8 @@ def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, fa
 def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
     new_jobs = 0
     
-    # 🟢 STEP 1: Dynamically check the tracking state *specifically* for this company
-    is_company_first_scan = not has_company_ever_been_scanned(company_name)
-    if is_company_first_scan:
-        print(f"🚀 Company Initialization Mode Engaged for: {company_name}. Indexing full catalog.")
+    # 🟢 STEP 1: Look up pre-calculated scan history state for this company
+    is_company_first_scan = COMPANY_STATUS_REGISTRY.get(company_name, True)
     
     for job in found_jobs:
         title = job['title']
@@ -351,9 +342,9 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
             if any(tech in title_lower for tech in TECH_ROLES):
                 
-                # 🟢 STEP 2: Smart Hybrid Gate. 
-                # If this is the script's first time visiting THIS company, bypass deduplication.
-                # If this company has been scanned before, only let brand-new postings pass.
+                # 🟢 STEP 2: Unified Hybrid Guardrail. 
+                # If this company is clean/unindexed, let everything pass to alert the complete catalog.
+                # If this company has been scanned before, strictly enforce the deduplication barrier.
                 if not is_company_first_scan and is_already_processed(job_id):
                     continue
                     
@@ -479,34 +470,56 @@ if __name__ == "__main__":
     db_url = f"{SUPABASE_URL}/rest/v1/tracking_companies?is_active=eq.true"
     try:
         companies = httpx.get(db_url, headers=DB_HEADERS).json()
+        
+        # 🟢 FIX: Snapshot historical data footprint maps BEFORE the loop runs
+        print("📊 Analyzing global tracking registries...")
+        history_url = f"{SUPABASE_URL}/rest/v1/processed_jobs?select=company_name"
+        history_res = httpx.get(history_url, headers=DB_HEADERS).json()
+        
+        # Extract a clean, searchable list of target companies that already have history logs
+        PREVIOUSLY_SCANNED_COMPANIES = {str(row.get("company_name", "")).strip() for row in history_res} if isinstance(history_res, list) else set()
+        print(f"✅ State verified. Found historical keys for {len(PREVIOUSLY_SCANNED_COMPANIES)} targets.")
+
         total_companies = 0
         successful_scans = 0
         total_jobs = 0
         total_new_jobs = 0
         failed_companies = []
+        
         for target in companies:
             total_companies += 1
+            company_name = target['company_name']
             started_at = datetime.now(timezone.utc)
+            
+            # 🟢 FIX: Map tracking mode states securely to global memory container
+            is_new_target = company_name not in PREVIOUSLY_SCANNED_COMPANIES
+            COMPANY_STATUS_REGISTRY[company_name] = is_new_target
+            
+            if is_new_target:
+                print(f"🚀 [INIT MODE] {company_name} is unindexed. Cataloging full directory.")
+            else:
+                print(f"🛡️ [DELTA MODE] {company_name} verified. Scanning for incremental upgrades.")
+
             if target['ats_type'] == 'workday':
-                result = fetch_workday(target['token_or_subdomain'], target['company_name'])
+                result = fetch_workday(target['token_or_subdomain'], company_name)
             elif target['ats_type'] == 'greenhouse':
-                result = fetch_greenhouse(target['token_or_subdomain'], target['company_name'])
+                result = fetch_greenhouse(target['token_or_subdomain'], company_name)
             elif target['ats_type'] == 'lever':
-                result = fetch_lever(target['token_or_subdomain'], target['company_name'])
+                result = fetch_lever(target['token_or_subdomain'], company_name)
             elif target['ats_type'] == 'oracle':
-                result = fetch_oracle(target['token_or_subdomain'], target['company_name'])
+                result = fetch_oracle(target['token_or_subdomain'], company_name)
             else:
                 result = {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": "Unsupported ATS"}
+                
             finished_at = datetime.now(timezone.utc)
-
-            log_scan_run(target['company_name'], target['ats_type'], result["jobs_fetched"], result["new_jobs"], result["success"], result["error"], started_at, finished_at)
+            log_scan_run(company_name, target['ats_type'], result["jobs_fetched"], result["new_jobs"], result["success"], result["error"], started_at, finished_at)
 
             total_jobs += result["jobs_fetched"]
             total_new_jobs += result["new_jobs"]
             if result["success"]:
                 successful_scans += 1
             else:
-                failed_companies.append(f"{target['company_name']} ({result['error']})")
+                failed_companies.append(f"{company_name} ({result['error']})")
 
         send_run_summary(total_companies, successful_scans, total_jobs, total_new_jobs, failed_companies)
         check_stale_scans(companies, STALE_SCAN_HOURS)

@@ -28,12 +28,16 @@ EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "
 # 📍 BROADENED GEOGRAPHIC HUB FILTER
 TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote"]
 
-# 🚫 REFACTORED EXCLUSION BLOCKLIST (Permits entry-level tier markers like "I" or "1")
+# 🚫 REFACTORED EXCLUSION BLOCKLIST (Blocks senior tiers, global regions, and explicit product levels)
 EXCLUSION_BLOCKLIST = [
     "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts", "ii", "iii", "cloudera",
     "auditor", "audit", "content", "copy writer", "graphic", "designer", "video", "editor", 
     "hr", "talent acquisition", "recruiter", "benefits", "operations", "people", "marketing", "martech",
-    "sales", "executive", "account", "alliances", "brand", "customer success", "cst", "support", "business development", "bde", "finance"
+    "sales", "executive", "account", "alliances", "brand", "customer success", "cst", "support", "business development", "bde", "finance",
+    # Global Location Filters (Prevents international remote leakage)
+    "brazil", "estonia", "united kingdom", " uk ", "london", "canada", " germany ", "munich", "poland", "amsterdam",
+    # Alphanumeric Tech Level Filters (Blocks mid-to-senior product bands)
+    "l2", "l3", "l4", "l5", "l6", "level 2", "level 3", "level 4", "e2", "e3", "e4", "ic2", "ic3", "ic4"
 ]
 
 # ⛔ EXPERIENCE REJECTION REGEX (Drops roles explicitly demanding mid-to-senior industry backgrounds)
@@ -50,9 +54,6 @@ DB_HEADERS = {
     "Content-Type": "application/json"
 }
 
-# 🟢 GLOBAL STATE VARIABLE FOR DYNAMIC TRACKING MODE MODE
-IS_FIRST_RUN_EVER = False
-
 def verify_network_health():
     """Circuit breaker checking if baseline platforms resolve cleanly to prevent local caching drops."""
     test_domains = ["boards-api.greenhouse.io", "api.lever.co"]
@@ -64,22 +65,15 @@ def verify_network_health():
             return False
     return True
 
-def check_if_database_is_empty():
-    """Checks your Supabase repository to dynamically decide if historical seeding is required."""
-    global IS_FIRST_RUN_EVER
-    url = f"{SUPABASE_URL}/rest/v1/processed_jobs?select=job_id&limit=1"
+def has_company_ever_been_scanned(company_name):
+    """Checks if this specific company has any history inside your deduplication registry."""
+    url = f"{SUPABASE_URL}/rest/v1/processed_jobs?company_name=eq.{company_name}&select=job_id&limit=1"
     try:
         response = httpx.get(url, headers=DB_HEADERS, timeout=10)
-        data = response.json()
-        if len(data) == 0:
-            IS_FIRST_RUN_EVER = True
-            print("🆕 REGISTRY EMPTY: Launching historical catalog harvest mode.")
-        else:
-            IS_FIRST_RUN_EVER = False
-            print("🛡️ REGISTRY ACTIVE: Running in strict delta-update channel filter mode.")
+        return len(response.json()) > 0
     except Exception as e:
-        print(f"⚠️ Error initializing database mode checking check: {e}")
-        IS_FIRST_RUN_EVER = False
+        print(f"⚠️ Error loading company history state for {company_name}: {e}")
+        return True # Default to True on failure to safely prevent alert floods
 
 def parse_json_or_raise(response, context):
     try:
@@ -329,15 +323,20 @@ def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, fa
         f"🏢 Companies scanned: {total_companies}\n"
         f"✅ Successful scans: {successful_scans}\n"
         f"📄 Jobs fetched: {total_jobs}\n"
-        f"🆕 Matches outputted to feed: {new_jobs}\n"
+        f"🆕 Total matches pushed: {new_jobs}\n"
         f"❌ Failed scans: {failed_count}\n"
         f"Failures:\n{failure_lines}"
     )
     send_telegram_message(summary, markdown=True)
 
 def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
-    global IS_FIRST_RUN_EVER
     new_jobs = 0
+    
+    # 🟢 STEP 1: Dynamically check the tracking state *specifically* for this company
+    is_company_first_scan = not has_company_ever_been_scanned(company_name)
+    if is_company_first_scan:
+        print(f"🚀 Company Initialization Mode Engaged for: {company_name}. Indexing full catalog.")
+    
     for job in found_jobs:
         title = job['title']
         title_lower = title.lower()
@@ -352,10 +351,10 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
             if any(tech in title_lower for tech in TECH_ROLES):
                 
-                # 🟢 AUTOMATED HYBRID GATEWAY
-                # If your database contains 0 jobs, it bypasses deduplication to push historical catalog data.
-                # If jobs exist, it switches to strict delta mode.
-                if not IS_FIRST_RUN_EVER and is_already_processed(job_id):
+                # 🟢 STEP 2: Smart Hybrid Gate. 
+                # If this is the script's first time visiting THIS company, bypass deduplication.
+                # If this company has been scanned before, only let brand-new postings pass.
+                if not is_company_first_scan and is_already_processed(job_id):
                     continue
                     
                 wday_raw_path = job.get('raw_path', job_id)
@@ -476,9 +475,6 @@ if __name__ == "__main__":
     if not verify_network_health():
         print("🚨 Run Aborted: Network environment connection lookup failure.")
         sys.exit(1)
-
-    # Invoke mode checking logic before executing the main loop
-    check_if_database_is_empty()
 
     db_url = f"{SUPABASE_URL}/rest/v1/tracking_companies?is_active=eq.true"
     try:

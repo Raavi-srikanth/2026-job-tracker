@@ -15,18 +15,18 @@ STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
 DEFAULT_ORACLE_SITE_NAME = "CX_1"
 
-# 🎯 EXPANDED TECH ROLE KEYWORDS (Captures AI, ML, Data Science, SDE, and Cloud tracks)
+# 🎯 TECH ROLE KEYWORDS (AI, ML, Data Science, SDE, and Cloud tracks)
 TECH_ROLES = [
     "ai", "ml", "machine learning", "artificial intelligence", "data scientist", 
     "data analyst", "sde", "software engineer", "software developer", "programmer", 
-    "tech intern", "software engr", "cloud developer", "cloud engineer", "aws", "devops", "python developer"
+    "tech intern", "software engr", "cloud developer", "cloud engineer", "aws", "devops"
 ]
 
 # ⏱️ EARLY CAREER DESCRIPTION MARKERS (Used to validate JDs during deep text scans)
 EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "university", "junior", "associate"]
 
 # 📍 BROADENED GEOGRAPHIC HUB FILTER
-TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india"]
+TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote"]
 
 # 🚫 REFACTORED EXCLUSION BLOCKLIST (Permits entry-level tier markers like "I" or "1")
 EXCLUSION_BLOCKLIST = [
@@ -38,10 +38,10 @@ EXCLUSION_BLOCKLIST = [
 
 # ⛔ EXPERIENCE REJECTION REGEX (Drops roles explicitly demanding mid-to-senior industry backgrounds)
 EXPERIENCE_REGEX = [
-    r"([2-9]|\d{2,})\s*\+?\s*years?", 
-    r"([2-9])\s*-\s*(\d+)\s*years?",
-    r"experience\s*required",
-    r"minimum\s*of\s*([2-9]|\d+)\s*years"
+    r"minimum\s*(?:of)?\s*([2-9]|\d{2,})\s*years?",
+    r"requires?\s*([2-9]|\d{2,})\s*\+?\s*years?",
+    r"([2-9]|\d{2,})\s*\+?\s*years?(?:\s*of)?\s*(?:professional|relevant|industry|work|direct)?\s*experience",
+    r"([3-9]|\d{2,})\s*-\s*(\d+)\s*years"
 ]
 
 DB_HEADERS = {
@@ -49,6 +49,9 @@ DB_HEADERS = {
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json"
 }
+
+# 🟢 GLOBAL STATE VARIABLE FOR DYNAMIC TRACKING MODE MODE
+IS_FIRST_RUN_EVER = False
 
 def verify_network_health():
     """Circuit breaker checking if baseline platforms resolve cleanly to prevent local caching drops."""
@@ -60,6 +63,23 @@ def verify_network_health():
             print(f"🚨 Network Check Failed: Cannot resolve baseline domain {domain}")
             return False
     return True
+
+def check_if_database_is_empty():
+    """Checks your Supabase repository to dynamically decide if historical seeding is required."""
+    global IS_FIRST_RUN_EVER
+    url = f"{SUPABASE_URL}/rest/v1/processed_jobs?select=job_id&limit=1"
+    try:
+        response = httpx.get(url, headers=DB_HEADERS, timeout=10)
+        data = response.json()
+        if len(data) == 0:
+            IS_FIRST_RUN_EVER = True
+            print("🆕 REGISTRY EMPTY: Launching historical catalog harvest mode.")
+        else:
+            IS_FIRST_RUN_EVER = False
+            print("🛡️ REGISTRY ACTIVE: Running in strict delta-update channel filter mode.")
+    except Exception as e:
+        print(f"⚠️ Error initializing database mode checking check: {e}")
+        IS_FIRST_RUN_EVER = False
 
 def parse_json_or_raise(response, context):
     try:
@@ -183,14 +203,13 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
         print(f"Failed to fetch JD description for {job_id}: {e}")
         return True 
 
-    # Rejection Filter: Check if mid-to-senior industry experience bounds are declared
     for pattern in EXPERIENCE_REGEX:
         if re.search(pattern, text_to_scan):
-            # Safe Release Check: Double check if the JD mentions it accepts freshers/interns as an alternative
-            if any(marker in text_to_scan for marker in ["fresher", "intern", "graduate training"]):
+            if re.search(r"\b0\s*-\s*[23]\s*years?", text_to_scan) or "0+" in text_to_scan:
                 continue
-            print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match.")
+            print(f"🚫 Deep Scan Dropped {job_id}: Explicit structural experience required threshold matched.")
             return False
+            
     return True
 
 def send_telegram_message(message, markdown=True):
@@ -209,7 +228,7 @@ def send_telegram_message(message, markdown=True):
 
 def send_telegram_alert(company, title, url, location):
     message = (
-        f"🎯 *NEW ENTRY/GRADUATE ROLE DETECTED*\n"
+        f"🎯 *MATCHED TRACK PROFILE ENGAGED*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *Company:* {company}\n"
         f"💼 *Role:* {title}\n"
@@ -222,14 +241,32 @@ def send_telegram_alert(company, title, url, location):
 
 def is_already_processed(job_id):
     url = f"{SUPABASE_URL}/rest/v1/processed_jobs?job_id=eq.{job_id}&select=job_id"
-    try: return len(httpx.get(url, headers=DB_HEADERS).json()) > 0
-    except: return False
+    try:
+        response = httpx.get(url, headers=DB_HEADERS, timeout=10)
+        data = response.json()
+        return len(data) > 0
+    except Exception as e:
+        print(f"⚠️ Database lookup failure for {job_id}: {e}")
+        return False
 
 def save_job_to_db(job_id, company, title, job_url):
     url = f"{SUPABASE_URL}/rest/v1/processed_jobs"
-    payload = {"job_id": str(job_id), "company_name": company, "title": title, "url": job_url}
-    try: httpx.post(url, json=payload, headers=DB_HEADERS)
-    except: pass
+    payload = {
+        "job_id": str(job_id), 
+        "company_name": str(company), 
+        "title": str(title), 
+        "url": str(job_url)
+    }
+    headers = DB_HEADERS.copy()
+    headers["Prefer"] = "return=minimal"
+    try:
+        response = httpx.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code >= 400:
+            print(f"❌ Supabase Insertion Rejected ({response.status_code}): {response.text}")
+        else:
+            print(f"✅ Successfully committed {job_id} to deduplication registry.")
+    except Exception as e:
+        print(f"❌ Network failure while saving to Supabase: {e}")
 
 def log_scan_run(company_name, ats_type, jobs_fetched, new_jobs, success, error_message, started_at, finished_at):
     url = f"{SUPABASE_URL}/rest/v1/scan_runs"
@@ -292,13 +329,14 @@ def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, fa
         f"🏢 Companies scanned: {total_companies}\n"
         f"✅ Successful scans: {successful_scans}\n"
         f"📄 Jobs fetched: {total_jobs}\n"
-        f"🆕 New jobs matched: {new_jobs}\n"
+        f"🆕 Matches outputted to feed: {new_jobs}\n"
         f"❌ Failed scans: {failed_count}\n"
         f"Failures:\n{failure_lines}"
     )
     send_telegram_message(summary, markdown=True)
 
 def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
+    global IS_FIRST_RUN_EVER
     new_jobs = 0
     for job in found_jobs:
         title = job['title']
@@ -308,27 +346,29 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         location = job.get('location', 'India')
         location_lower = location.lower()
         
-        # Hard Rejection Exclusion Pass
         if any(block in title_lower for block in EXCLUSION_BLOCKLIST):
             continue
             
-        # Geographic Affinity Pass
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
-            # 🟢 OPTIMIZED GATE: Matches core software/data engineering pipelines first
             if any(tech in title_lower for tech in TECH_ROLES):
-                if not is_already_processed(job_id):
-                    wday_raw_path = job.get('raw_path', job_id)
-                    scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
-                    detail_url_override = job.get('detail_url')
+                
+                # 🟢 AUTOMATED HYBRID GATEWAY
+                # If your database contains 0 jobs, it bypasses deduplication to push historical catalog data.
+                # If jobs exist, it switches to strict delta mode.
+                if not IS_FIRST_RUN_EVER and is_already_processed(job_id):
+                    continue
                     
-                    # Pass directly down to the text scanner to evaluate experience structures dynamically
-                    if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, detail_url_override=detail_url_override):
-                        continue
-                        
-                    print(f"🔥 Validated Target Profile: {title} at {company_name} ({location})")
-                    save_job_to_db(job_id, company_name, title, job_url)
-                    send_telegram_alert(company_name, title, job_url, location)
-                    new_jobs += 1
+                wday_raw_path = job.get('raw_path', job_id)
+                scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
+                detail_url_override = job.get('detail_url')
+                
+                if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, detail_url_override=detail_url_override):
+                    continue
+                    
+                print(f"🔥 Processing Match Target: {title} at {company_name} ({location})")
+                save_job_to_db(job_id, company_name, title, job_url)
+                send_telegram_alert(company_name, title, job_url, location)
+                new_jobs += 1
     return new_jobs
 
 def fetch_oracle(subdomain, company_name):
@@ -383,7 +423,6 @@ def fetch_lever(token, company_name):
     try:
         response = httpx.get(url, timeout=15)
         res = parse_json_or_raise(response, f"Lever jobs fetch for {company_name}")
-        
         raw_postings = []
         if isinstance(res, list):
             raw_postings = res
@@ -437,6 +476,9 @@ if __name__ == "__main__":
     if not verify_network_health():
         print("🚨 Run Aborted: Network environment connection lookup failure.")
         sys.exit(1)
+
+    # Invoke mode checking logic before executing the main loop
+    check_if_database_is_empty()
 
     db_url = f"{SUPABASE_URL}/rest/v1/tracking_companies?is_active=eq.true"
     try:

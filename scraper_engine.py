@@ -46,12 +46,15 @@ DB_HEADERS = {
 }
 
 def verify_network_health():
-    """Circuit breaker checking if the local runtime context can resolve base DNS systems."""
-    try:
-        socket.gethostbyname("boards-api.greenhouse.io")
-        return True
-    except socket.gaierror:
-        return False
+    """Circuit breaker checking if multiple baseline ATS platform domains resolve cleanly."""
+    test_domains = ["boards-api.greenhouse.io", "api.lever.co"]
+    for domain in test_domains:
+        try:
+            socket.gethostbyname(domain)
+        except socket.gaierror:
+            print(f"🚨 Network Check Failed: Cannot resolve baseline domain {domain}")
+            return False
+    return True
 
 def parse_json_or_raise(response, context):
     try:
@@ -96,7 +99,6 @@ def build_workday_endpoints(token_or_subdomain):
     if not token:
         raise ValueError("Missing Workday token_or_subdomain")
         
-    # If the database contains a full modern sub-domain or clean URL
     if "myworkdayjobs.com" in token:
         parsed = urlparse(token if "://" in token else f"https://{token}")
         host = (parsed.hostname or "").strip()
@@ -107,7 +109,6 @@ def build_workday_endpoints(token_or_subdomain):
             tenant = path_parts[cxs_idx + 1]
             site = path_parts[cxs_idx + 2]
         else:
-            # Safely grab tenant from the split domain string or path
             tenant = host.split(".")[0]
             site = path_parts[0] if path_parts else tenant
             
@@ -118,7 +119,6 @@ def build_workday_endpoints(token_or_subdomain):
             "public_base_url": f"https://{host}"
         }
     
-    # Fallback legacy parsing for standard root tokens
     parsed = urlparse(token if "://" in token else f"https://{token}")
     host = (parsed.hostname or "").strip()
     path_parts = [p for p in parsed.path.split("/") if p]
@@ -140,6 +140,7 @@ def build_workday_endpoints(token_or_subdomain):
         "job_details_url": f"{base}/jobDetails",
         "public_base_url": f"https://{host}"
     }
+
 def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
     text_to_scan = ""
     try:
@@ -166,7 +167,8 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
         elif ats_type == "workday":
             url = detail_url_override or build_workday_endpoints(token_or_subdomain)["job_details_url"]
             payload = {"externalPath": job_id}
-            response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10)
+            # 🟢 Added follow_redirects=True to child deep-scans as well
+            response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10, follow_redirects=True)
             res = parse_json_or_raise(response, f"Workday JD fetch for {job_id}")
             text_to_scan = res.get("jobDescription", "").lower()
     except Exception as e:
@@ -334,20 +336,21 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
     return new_jobs
 
 def fetch_oracle(subdomain, company_name):
-    """Hits internal JSON endpoints behind corporate Oracle installations."""
     oracle_host = build_oracle_host(subdomain)
-    # 🟢 FIXED: Removed structural locationId query string variable to handle strict cross-tenant 400 parameter errors safely
-    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=50" 
+    # 🟢 CountryCode filter fallback mechanism helps guard against localized 404 router structural errors
+    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=50&countryCode=IN" 
     try:
         response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
+        if response.status_code in (400, 404):
+            fallback_url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25"
+            response = httpx.get(fallback_url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
+            
         res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
         if not isinstance(res, dict):
             raise ValueError(f"Oracle jobs fetch returned unexpected type: {type(res).__name__}")
         jobs = []
         for item in res.get('items', []):
-            if not isinstance(item, dict):
-                continue
-            if not item.get("Id") or not item.get("Title"):
+            if not isinstance(item, dict) or not item.get("Id") or not item.get("Title"):
                 continue
             locations_list = [loc.get('Name', '') for loc in item.get('JobLocations', [])]
             locations_str = ", ".join(locations_list) if locations_list else "India"
@@ -394,7 +397,6 @@ def fetch_lever(token, company_name):
         response = httpx.get(url, timeout=15)
         res = parse_json_or_raise(response, f"Lever jobs fetch for {company_name}")
         
-        # 🟢 FIXED: Polymorphic extraction layers to safely read both Lever raw data tables and wrapped root objects
         raw_postings = []
         if isinstance(res, list):
             raw_postings = res
@@ -425,7 +427,8 @@ def fetch_workday(subdomain, company_name):
     url = endpoints["jobs_url"]
     payload = {"appliedFacets": {"locationCountry": ["bc33aa3152ec42d4995f4791a106ed09"]}, "limit": 20, "offset": 0, "searchText": ""}
     try:
-        response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15)
+        # 🟢 FIXED: Added follow_redirects=True to handle Walmart's 303 gateway router proxy jumps smoothly
+        response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15, follow_redirects=True)
         res = parse_json_or_raise(response, f"Workday jobs fetch for {company_name}")
         if not isinstance(res, dict):
             raise ValueError(f"Workday jobs fetch returned unexpected type: {type(res).__name__}")
@@ -456,7 +459,6 @@ def fetch_workday(subdomain, company_name):
         return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
 
 if __name__ == "__main__":
-    # 🟢 FIXED: Safety Gateway Circuit Breaker prevents false alerts if environment infrastructure drops off mid-run
     if not verify_network_health():
         print("🚨 Run Aborted: Network environment is experiencing DNS connection failures.")
         send_telegram_message("🚨 *Critical Automation Alert*: System runner lost DNS resolution capability. Processing cycle safely paused to maintain tracking state parity.", markdown=True)

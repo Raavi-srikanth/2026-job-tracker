@@ -95,25 +95,41 @@ def build_workday_endpoints(token_or_subdomain):
     token = normalize_token(token_or_subdomain)
     if not token:
         raise ValueError("Missing Workday token_or_subdomain")
+        
+    # If the database contains a full modern sub-domain or clean URL
+    if "myworkdayjobs.com" in token:
+        parsed = urlparse(token if "://" in token else f"https://{token}")
+        host = (parsed.hostname or "").strip()
+        path_parts = [p for p in parsed.path.split("/") if p]
+        
+        if "cxs" in path_parts:
+            cxs_idx = path_parts.index("cxs")
+            tenant = path_parts[cxs_idx + 1]
+            site = path_parts[cxs_idx + 2]
+        else:
+            # Safely grab tenant from the split domain string or path
+            tenant = host.split(".")[0]
+            site = path_parts[0] if path_parts else tenant
+            
+        base = f"https://{host}/wday/cxs/{tenant}/{site}"
+        return {
+            "jobs_url": f"{base}/jobs",
+            "job_details_url": f"{base}/jobDetails",
+            "public_base_url": f"https://{host}"
+        }
+    
+    # Fallback legacy parsing for standard root tokens
     parsed = urlparse(token if "://" in token else f"https://{token}")
     host = (parsed.hostname or "").strip()
     path_parts = [p for p in parsed.path.split("/") if p]
 
     if "cxs" in path_parts:
         cxs_idx = path_parts.index("cxs")
-        if len(path_parts) <= cxs_idx + 2:
-            raise ValueError(
-                f"Invalid Workday cxs path: {parsed.path}. "
-                f"Expected format like /wday/cxs/<tenant>/<site>/..."
-            )
         tenant = path_parts[cxs_idx + 1]
         site = path_parts[cxs_idx + 2]
     else:
         tenant = host.split(".")[0] if host else token.split("/")[0]
         site = tenant
-
-    if not tenant or not site:
-        raise ValueError(f"Invalid Workday token_or_subdomain: {token_or_subdomain}")
 
     if not host or "myworkdayjobs.com" not in host:
         host = f"{tenant}.myworkdayjobs.com"
@@ -124,7 +140,6 @@ def build_workday_endpoints(token_or_subdomain):
         "job_details_url": f"{base}/jobDetails",
         "public_base_url": f"https://{host}"
     }
-
 def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
     text_to_scan = ""
     try:

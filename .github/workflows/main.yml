@@ -22,11 +22,15 @@ jobs:
 
       - name: Set Public DNS Resolvers
         run: |
-          sudo sed -i 's/#DNS=/DNS=8.8.8.8 1.1.1.1/g' /etc/systemd/resolved.conf
-          sudo systemctl daemon-reload
-          sudo systemctl restart systemd-resolved
+          # 1. Break the symlink to systemd-resolved to gain direct file control
+          sudo rm -f /etc/resolv.conf
           
-          # Verify that Workday domains resolve cleanly through the new resolvers
+          # 2. Force append high-throughput public engines directly to the resolution stack
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
+          
+          # 3. Verify the resolution engine bypasses the local cache loop
+          cat /etc/resolv.conf
           nslookup barclays.myworkdayjobs.com
 
       - name: Fire Execution Scraper Pipeline

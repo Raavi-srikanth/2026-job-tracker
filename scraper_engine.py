@@ -74,11 +74,17 @@ def build_oracle_host(token_or_subdomain):
     token = normalize_token(token_or_subdomain)
     if not token:
         raise ValueError("Missing Oracle token_or_subdomain")
-    parsed = urlparse(token if "://" in token else f"https://{token}")
-    host = (parsed.netloc or "").strip() or token.split("/")[0]
-    if not host:
-        raise ValueError(f"Invalid Oracle token_or_subdomain: {token_or_subdomain}")
-    if "oraclecloud.com" not in host:
+        
+    # 🟢 FIXED: Safely isolates host boundary when direct full-path cluster URIs are provided
+    if "://" in token:
+        parsed = urlparse(token)
+        host = parsed.netloc
+    elif "/" in token:
+        host = token.split("/")[0]
+    else:
+        host = token
+        
+    if host and "oraclecloud.com" not in host:
         host = f"{host}.fa.ocs.oraclecloud.com"
     return host
 
@@ -167,7 +173,6 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
         elif ats_type == "workday":
             url = detail_url_override or build_workday_endpoints(token_or_subdomain)["job_details_url"]
             payload = {"externalPath": job_id}
-            # 🟢 Added follow_redirects=True to child deep-scans as well
             response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=10, follow_redirects=True)
             res = parse_json_or_raise(response, f"Workday JD fetch for {job_id}")
             text_to_scan = res.get("jobDescription", "").lower()
@@ -337,7 +342,6 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
 
 def fetch_oracle(subdomain, company_name):
     oracle_host = build_oracle_host(subdomain)
-    # 🟢 CountryCode filter fallback mechanism helps guard against localized 404 router structural errors
     url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=50&countryCode=IN" 
     try:
         response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
@@ -427,7 +431,7 @@ def fetch_workday(subdomain, company_name):
     url = endpoints["jobs_url"]
     payload = {"appliedFacets": {"locationCountry": ["bc33aa3152ec42d4995f4791a106ed09"]}, "limit": 20, "offset": 0, "searchText": ""}
     try:
-        # 🟢 FIXED: Added follow_redirects=True to handle Walmart's 303 gateway router proxy jumps smoothly
+        # 🟢 FIXED: Automatic redirect following ensures corporate 303 router queries resolve reliably
         response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15, follow_redirects=True)
         res = parse_json_or_raise(response, f"Workday jobs fetch for {company_name}")
         if not isinstance(res, dict):

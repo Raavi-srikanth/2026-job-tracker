@@ -15,28 +15,33 @@ STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
 DEFAULT_ORACLE_SITE_NAME = "CX_1"
 
-# 🎯 CORE TECH ROLE KEYWORDS
-TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
+# 🎯 EXPANDED TECH ROLE KEYWORDS (Captures AI, ML, Data Science, SDE, and Cloud tracks)
+TECH_ROLES = [
+    "ai", "ml", "machine learning", "artificial intelligence", "data scientist", 
+    "data analyst", "sde", "software engineer", "software developer", "programmer", 
+    "tech intern", "software engr", "cloud developer", "cloud engineer", "aws", "devops", "python developer"
+]
 
-# ⏱️ TECH EARLY CAREER MARKERS
-EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "i", "-1", " 1", "university"]
+# ⏱️ EARLY CAREER DESCRIPTION MARKERS (Used to validate JDs during deep text scans)
+EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "university", "junior", "associate"]
 
-# 📍 STRICT GEOGRAPHIC HUB FILTER
-TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai"]
+# 📍 BROADENED GEOGRAPHIC HUB FILTER
+TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote"]
 
-# 🚫 HARD EXCLUSION BLOCKLIST 
+# 🚫 REFACTORED EXCLUSION BLOCKLIST (Permits entry-level tier markers like "I" or "1")
 EXCLUSION_BLOCKLIST = [
-    "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts", "ii", "iii",
+    "senior", "sr.", "lead", "principal", "manager", "director", "architect", "staff", "mts", "ii", "iii", "cloudera",
     "auditor", "audit", "content", "copy writer", "graphic", "designer", "video", "editor", 
     "hr", "talent acquisition", "recruiter", "benefits", "operations", "people", "marketing", "martech",
     "sales", "executive", "account", "alliances", "brand", "customer success", "cst", "support", "business development", "bde", "finance"
 ]
 
-# ⛔ REGEX PATTERNS TO DETECT EXPERIENCE IN JOB DESCRIPTIONS
+# ⛔ EXPERIENCE REJECTION REGEX (Drops roles explicitly demanding mid-to-senior industry backgrounds)
 EXPERIENCE_REGEX = [
-    r"([2-9]|\d+)\s*\+?\s*years?", 
+    r"([2-9]|\d{2,})\s*\+?\s*years?", 
     r"([2-9])\s*-\s*(\d+)\s*years?",
-    r"experience\s*required"
+    r"experience\s*required",
+    r"minimum\s*of\s*([2-9]|\d+)\s*years"
 ]
 
 DB_HEADERS = {
@@ -46,7 +51,7 @@ DB_HEADERS = {
 }
 
 def verify_network_health():
-    """Circuit breaker checking if multiple baseline ATS platform domains resolve cleanly."""
+    """Circuit breaker checking if baseline platforms resolve cleanly to prevent local caching drops."""
     test_domains = ["boards-api.greenhouse.io", "api.lever.co"]
     for domain in test_domains:
         try:
@@ -74,8 +79,6 @@ def build_oracle_host(token_or_subdomain):
     token = normalize_token(token_or_subdomain)
     if not token:
         raise ValueError("Missing Oracle token_or_subdomain")
-        
-    # 🟢 FIXED: Safely isolates host boundary when direct full-path cluster URIs are provided
     if "://" in token:
         parsed = urlparse(token)
         host = parsed.netloc
@@ -180,9 +183,13 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
         print(f"Failed to fetch JD description for {job_id}: {e}")
         return True 
 
+    # Rejection Filter: Check if mid-to-senior industry experience bounds are declared
     for pattern in EXPERIENCE_REGEX:
         if re.search(pattern, text_to_scan):
-            print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match in description text.")
+            # Safe Release Check: Double check if the JD mentions it accepts freshers/interns as an alternative
+            if any(marker in text_to_scan for marker in ["fresher", "intern", "graduate training"]):
+                continue
+            print(f"🚫 Deep Scan Dropped {job_id}: Found required experience phrase match.")
             return False
     return True
 
@@ -202,7 +209,7 @@ def send_telegram_message(message, markdown=True):
 
 def send_telegram_alert(company, title, url, location):
     message = (
-        f"🎯 *NEW 2026 / INTERN TECH ROLE DETECTED*\n"
+        f"🎯 *NEW ENTRY/GRADUATE ROLE DETECTED*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *Company:* {company}\n"
         f"💼 *Role:* {title}\n"
@@ -239,9 +246,7 @@ def log_scan_run(company_name, ats_type, jobs_fetched, new_jobs, success, error_
     try:
         httpx.post(url, json=payload, headers=DB_HEADERS, timeout=10)
     except Exception as e:
-        log_error = f"Scan run logging failed for {company_name} (POST {url}): {e}"
-        print(log_error)
-        send_telegram_message(f"⚠️ {log_error}", markdown=False)
+        print(f"Logging failed for {company_name}: {e}")
 
 def parse_iso_datetime(value):
     if not value:
@@ -270,20 +275,13 @@ def check_stale_scans(companies, stale_hours):
                 stale_companies.append(f"{company['company_name']} (no successful scan)")
                 continue
             latest_scan = parse_iso_datetime(response[0].get("finished_at"))
-            if latest_scan is None:
-                stale_companies.append(f"{company['company_name']} (invalid finished_at format)")
-            elif (now_utc - latest_scan) > timedelta(hours=stale_hours):
+            if latest_scan is None or (now_utc - latest_scan) > timedelta(hours=stale_hours):
                 stale_companies.append(f"{company['company_name']} (stale)")
         except Exception as e:
-            stale_companies.append(f"{company['company_name']} (error checking scan status: {e})")
+            stale_companies.append(f"{company['company_name']} (error: {e})")
     if stale_companies:
         stale_lines = "\n".join([f"- {entry}" for entry in stale_companies])
-        send_telegram_message(
-            f"⚠️ *Stale Scan Alert*\n"
-            f"The following active companies have no successful scan in the last {stale_hours} hours:\n"
-            f"{stale_lines}",
-            markdown=True
-        )
+        send_telegram_message(f"⚠️ *Stale Scan Alert*\nMissing scans within {stale_hours}h:\n{stale_lines}", markdown=True)
 
 def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, failed_companies):
     failed_count = len(failed_companies)
@@ -299,14 +297,6 @@ def send_run_summary(total_companies, successful_scans, total_jobs, new_jobs, fa
         f"Failures:\n{failure_lines}"
     )
     send_telegram_message(summary, markdown=True)
-    if successful_scans == 0:
-        send_telegram_message(
-            f"🚨 *Heartbeat Alert*\n"
-            f"No company scans succeeded in this run.\n"
-            f"Attempts: {total_companies}, Failures: {failed_count}\n"
-            f"Please investigate workflow/runtime health immediately.",
-            markdown=True
-        )
 
 def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
     new_jobs = 0
@@ -318,19 +308,20 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
         location = job.get('location', 'India')
         location_lower = location.lower()
         
+        # Hard Rejection Exclusion Pass
         if any(block in title_lower for block in EXCLUSION_BLOCKLIST):
             continue
             
+        # Geographic Affinity Pass
         if any(loc in location_lower for loc in TARGET_LOCATIONS):
-            has_tech_core = any(tech in title_lower for tech in TECH_ROLES)
-            has_early_marker = any(marker in title_lower for marker in EXPERIENCE_MARKERS)
-            
-            if has_tech_core and has_early_marker:
+            # 🟢 OPTIMIZED GATE: Matches core software/data engineering pipelines first
+            if any(tech in title_lower for tech in TECH_ROLES):
                 if not is_already_processed(job_id):
                     wday_raw_path = job.get('raw_path', job_id)
                     scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
                     detail_url_override = job.get('detail_url')
                     
+                    # Pass directly down to the text scanner to evaluate experience structures dynamically
                     if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, detail_url_override=detail_url_override):
                         continue
                         
@@ -350,8 +341,6 @@ def fetch_oracle(subdomain, company_name):
             response = httpx.get(fallback_url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
             
         res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
-        if not isinstance(res, dict):
-            raise ValueError(f"Oracle jobs fetch returned unexpected type: {type(res).__name__}")
         jobs = []
         for item in res.get('items', []):
             if not isinstance(item, dict) or not item.get("Id") or not item.get("Title"):
@@ -367,17 +356,13 @@ def fetch_oracle(subdomain, company_name):
         new_jobs = process_matches(jobs, company_name, "oracle", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
-        error = str(e)
-        print(f"Oracle fetch failed for {company_name}: {error}")
-        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
+        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": str(e)}
 
 def fetch_greenhouse(subdomain, company_name):
     url = f"https://boards-api.greenhouse.io/v1/boards/{subdomain}/jobs"
     try:
         response = httpx.get(url, timeout=15)
         res = parse_json_or_raise(response, f"Greenhouse jobs fetch for {company_name}")
-        if not isinstance(res, dict):
-            raise ValueError(f"Greenhouse jobs fetch returned unexpected type: {type(res).__name__}")
         jobs = []
         for j in res.get('jobs', []):
             if not isinstance(j, dict) or not j.get("id") or not j.get("title") or not j.get("absolute_url"):
@@ -391,9 +376,7 @@ def fetch_greenhouse(subdomain, company_name):
         new_jobs = process_matches(jobs, company_name, "greenhouse", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
-        error = str(e)
-        print(f"Greenhouse fetch failed for {company_name}: {error}")
-        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
+        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": str(e)}
 
 def fetch_lever(token, company_name):
     url = f"https://api.lever.co/v0/postings/{token}?mode=json"
@@ -406,8 +389,6 @@ def fetch_lever(token, company_name):
             raw_postings = res
         elif isinstance(res, dict):
             raw_postings = res.get("data", res.get("postings", [])) if any(k in res for k in ("data", "postings")) else [res]
-        else:
-            raise ValueError(f"Lever jobs fetch returned unexpected type: {type(res).__name__}")
             
         jobs = []
         for j in raw_postings:
@@ -422,29 +403,21 @@ def fetch_lever(token, company_name):
         new_jobs = process_matches(jobs, company_name, "lever", token)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
-        error = str(e)
-        print(f"Lever fetch failed for {company_name}: {error}")
-        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
+        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": str(e)}
 
 def fetch_workday(subdomain, company_name):
     endpoints = build_workday_endpoints(subdomain)
     url = endpoints["jobs_url"]
     payload = {"appliedFacets": {"locationCountry": ["bc33aa3152ec42d4995f4791a106ed09"]}, "limit": 20, "offset": 0, "searchText": ""}
     try:
-        # 🟢 FIXED: Automatic redirect following ensures corporate 303 router queries resolve reliably
         response = httpx.post(url, json=payload, headers={"Accept": "application/json"}, timeout=15, follow_redirects=True)
         res = parse_json_or_raise(response, f"Workday jobs fetch for {company_name}")
-        if not isinstance(res, dict):
-            raise ValueError(f"Workday jobs fetch returned unexpected type: {type(res).__name__}")
         jobs = []
         for j in res.get('jobPostings', []):
             if not isinstance(j, dict):
                 continue
             external_path = j.get('externalPath', '')
-            if isinstance(external_path, str) and external_path.startswith("http"):
-                job_url = external_path
-            else:
-                job_url = f"{endpoints['public_base_url']}{external_path}"
+            job_url = external_path if isinstance(external_path, str) and external_path.startswith("http") else f"{endpoints['public_base_url']}{external_path}"
             if not j.get("jobPostingId") or not j.get("title") or not job_url:
                 continue
             jobs.append({
@@ -458,14 +431,11 @@ def fetch_workday(subdomain, company_name):
         new_jobs = process_matches(jobs, company_name, "workday", subdomain)
         return {"success": True, "jobs_fetched": len(jobs), "new_jobs": new_jobs, "error": None}
     except Exception as e:
-        error = str(e)
-        print(f"Workday fetch failed for {company_name}: {error}")
-        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
+        return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": str(e)}
 
 if __name__ == "__main__":
     if not verify_network_health():
-        print("🚨 Run Aborted: Network environment is experiencing DNS connection failures.")
-        send_telegram_message("🚨 *Critical Automation Alert*: System runner lost DNS resolution capability. Processing cycle safely paused to maintain tracking state parity.", markdown=True)
+        print("🚨 Run Aborted: Network environment connection lookup failure.")
         sys.exit(1)
 
     db_url = f"{SUPABASE_URL}/rest/v1/tracking_companies?is_active=eq.true"
@@ -488,24 +458,10 @@ if __name__ == "__main__":
             elif target['ats_type'] == 'oracle':
                 result = fetch_oracle(target['token_or_subdomain'], target['company_name'])
             else:
-                result = {
-                    "success": False,
-                    "jobs_fetched": 0,
-                    "new_jobs": 0,
-                    "error": f"Unsupported ATS type: {target['ats_type']} (supported: {', '.join(SUPPORTED_ATS_TYPES)})"
-                }
+                result = {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": "Unsupported ATS"}
             finished_at = datetime.now(timezone.utc)
 
-            log_scan_run(
-                target['company_name'],
-                target['ats_type'],
-                result["jobs_fetched"],
-                result["new_jobs"],
-                result["success"],
-                result["error"],
-                started_at,
-                finished_at
-            )
+            log_scan_run(target['company_name'], target['ats_type'], result["jobs_fetched"], result["new_jobs"], result["success"], result["error"], started_at, finished_at)
 
             total_jobs += result["jobs_fetched"]
             total_new_jobs += result["new_jobs"]
@@ -516,4 +472,5 @@ if __name__ == "__main__":
 
         send_run_summary(total_companies, successful_scans, total_jobs, total_new_jobs, failed_companies)
         check_stale_scans(companies, STALE_SCAN_HOURS)
-    except Exception as e: print(f"DB Error: {e}")
+    except Exception as e: 
+        print(f"DB Error: {e}")

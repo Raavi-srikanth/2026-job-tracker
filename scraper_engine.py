@@ -3,6 +3,7 @@ import sys
 import json
 import httpx
 import re
+import socket
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
@@ -13,7 +14,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STALE_SCAN_HOURS = int(os.environ.get("STALE_SCAN_HOURS", "24"))
 SUPPORTED_ATS_TYPES = ("workday", "greenhouse", "lever", "oracle")
 DEFAULT_ORACLE_SITE_NAME = "CX_1"
-INDIA_LOCATION_ID = "300000002344073"
 
 # 🎯 CORE TECH ROLE KEYWORDS
 TECH_ROLES = ["ai", "ml", "machine learning", "artificial intelligence", "data scientist", "data analyst", "sde", "software engineer", "software developer", "programmer", "tech intern", "software engr"]
@@ -44,6 +44,14 @@ DB_HEADERS = {
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json"
 }
+
+def verify_network_health():
+    """Circuit breaker checking if the local runtime context can resolve base DNS systems."""
+    try:
+        socket.gethostbyname("boards-api.greenhouse.io")
+        return True
+    except socket.gaierror:
+        return False
 
 def parse_json_or_raise(response, context):
     try:
@@ -118,13 +126,9 @@ def build_workday_endpoints(token_or_subdomain):
     }
 
 def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
-    """Deep-scans raw job description texts from Oracle, Greenhouse, Lever, and Workday.
-    detail_url_override is used for Workday when a precomputed jobDetails endpoint is available.
-    """
     text_to_scan = ""
     try:
         if ats_type == "oracle":
-            # Oracle Cloud Candidate Experience API endpoint
             oracle_host = build_oracle_host(token_or_subdomain)
             url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings/{job_id}"
             response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
@@ -315,11 +319,12 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
     return new_jobs
 
 def fetch_oracle(subdomain, company_name):
-    """Hits the direct internal JSON endpoints running behind corporate Oracle Cloud installations."""
+    """Hits internal JSON endpoints behind corporate Oracle installations."""
     oracle_host = build_oracle_host(subdomain)
-    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=25&locationId={INDIA_LOCATION_ID}" # Static India location filter
+    # 🟢 FIXED: Removed structural locationId query string variable to handle strict cross-tenant 400 parameter errors safely
+    url = f"https://{oracle_host}/hcmRestApi/resources/latest/recruitingCandidateExperienceJobPostings?limit=50" 
     try:
-        response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        response = httpx.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
         res = parse_json_or_raise(response, f"Oracle jobs fetch for {company_name}")
         if not isinstance(res, dict):
             raise ValueError(f"Oracle jobs fetch returned unexpected type: {type(res).__name__}")
@@ -373,10 +378,18 @@ def fetch_lever(token, company_name):
     try:
         response = httpx.get(url, timeout=15)
         res = parse_json_or_raise(response, f"Lever jobs fetch for {company_name}")
-        if not isinstance(res, list):
+        
+        # 🟢 FIXED: Polymorphic extraction layers to safely read both Lever raw data tables and wrapped root objects
+        raw_postings = []
+        if isinstance(res, list):
+            raw_postings = res
+        elif isinstance(res, dict):
+            raw_postings = res.get("data", res.get("postings", [])) if any(k in res for k in ("data", "postings")) else [res]
+        else:
             raise ValueError(f"Lever jobs fetch returned unexpected type: {type(res).__name__}")
+            
         jobs = []
-        for j in res:
+        for j in raw_postings:
             if not isinstance(j, dict) or not j.get("id") or not j.get("text") or not j.get("hostedUrl"):
                 continue
             jobs.append({
@@ -428,6 +441,12 @@ def fetch_workday(subdomain, company_name):
         return {"success": False, "jobs_fetched": 0, "new_jobs": 0, "error": error}
 
 if __name__ == "__main__":
+    # 🟢 FIXED: Safety Gateway Circuit Breaker prevents false alerts if environment infrastructure drops off mid-run
+    if not verify_network_health():
+        print("🚨 Run Aborted: Network environment is experiencing DNS connection failures.")
+        send_telegram_message("🚨 *Critical Automation Alert*: System runner lost DNS resolution capability. Processing cycle safely paused to maintain tracking state parity.", markdown=True)
+        sys.exit(1)
+
     db_url = f"{SUPABASE_URL}/rest/v1/tracking_companies?is_active=eq.true"
     try:
         companies = httpx.get(db_url, headers=DB_HEADERS).json()

@@ -26,7 +26,7 @@ TECH_ROLES = [
 EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "university", "junior", "associate"]
 
 # 📍 BROADENED GEOGRAPHIC HUB FILTER
-TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote"]
+TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india"]
 
 # 🚫 REFACTORED EXCLUSION BLOCKLIST (Permits entry-level tier markers like "I" or "1")
 EXCLUSION_BLOCKLIST = [

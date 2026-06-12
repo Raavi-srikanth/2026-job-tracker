@@ -20,10 +20,20 @@ jobs:
       - name: Core Dependencies Extraction
         run: pip install httpx
 
+      - name: Set Public DNS Resolvers
+        run: |
+          sudo sed -i 's/#DNS=/DNS=8.8.8.8 1.1.1.1/g' /etc/systemd/resolved.conf
+          sudo systemctl daemon-reload
+          sudo systemctl restart systemd-resolved
+          
+          # Verify that Workday domains resolve cleanly through the new resolvers
+          nslookup barclays.myworkdayjobs.com
+
       - name: Fire Execution Scraper Pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STALE_SCAN_HOURS: 24
         run: python scraper_engine.py

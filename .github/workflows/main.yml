@@ -31,7 +31,7 @@ jobs:
           
           # 3. Verify the resolution engine bypasses the local cache loop
           cat /etc/resolv.conf
-          nslookup barclays.myworkdayjobs.com
+          nslookup walmart.wd5.myworkdayjobs.com
 
       - name: Fire Execution Scraper Pipeline
         env:

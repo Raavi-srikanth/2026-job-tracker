@@ -23,7 +23,12 @@ TECH_ROLES = [
 ]
 
 # ⏱️ EARLY CAREER DESCRIPTION MARKERS (Used to validate JDs during deep text scans)
-EXPERIENCE_MARKERS = ["2026", "graduate", "trainee", "fresher", "entry level", "intern", "internship", "university", "junior", "associate"]
+EXPERIENCE_MARKERS = [
+    "2026", "2025", "graduate", "graduates", "trainee", "fresher", "freshers",
+    "entry level", "entry-level", "intern", "internship", "university", "campus",
+    "junior", "associate", "early career", "early-career", "new grad", "new graduate",
+    "recent graduate", "early in career", "0-1 year", "0-2 year", "0 to 1 year", "0 to 2 year"
+]
 
 # 📍 BROADENED GEOGRAPHIC HUB FILTER
 TARGET_LOCATIONS = ["bengaluru", "bangalore", "hyderabad", "chennai", "india", "remote-india"]
@@ -157,7 +162,7 @@ def build_workday_endpoints(token_or_subdomain):
         "public_base_url": f"https://{host}"
     }
 
-def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_override=None):
+def check_jd_experience(ats_type, job_id, token_or_subdomain, title_has_marker=False, detail_url_override=None):
     text_to_scan = ""
     try:
         if ats_type == "oracle":
@@ -188,7 +193,12 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
             text_to_scan = res.get("jobDescription", "").lower()
     except Exception as e:
         print(f"Failed to fetch JD description for {job_id}: {e}")
-        return True 
+        # Can't scan the JD text — fall back to checking if the title itself
+        # carries a fresher/2026/graduate-type signal.
+        if not title_has_marker:
+            print(f"🚫 Dropped {job_id}: JD fetch failed and title lacks fresher/grad signal.")
+            return False
+        return True
 
     for pattern in EXPERIENCE_REGEX:
         if re.search(pattern, text_to_scan):
@@ -196,7 +206,13 @@ def check_jd_experience(ats_type, job_id, token_or_subdomain, detail_url_overrid
                 continue
             print(f"🚫 Deep Scan Dropped {job_id}: Explicit structural experience required threshold matched.")
             return False
-            
+
+    # 🆕 POSITIVE SIGNAL CHECK: require an explicit fresher/2026/graduate-type
+    # marker in either the title or the job description text.
+    if not title_has_marker and not any(marker in text_to_scan for marker in EXPERIENCE_MARKERS):
+        print(f"🚫 Deep Scan Dropped {job_id}: No fresher/graduate/2026-type signal found in title or JD.")
+        return False
+
     return True
 
 def send_telegram_message(message, markdown=True):
@@ -351,8 +367,9 @@ def process_matches(found_jobs, company_name, ats_type, token_or_subdomain):
                 wday_raw_path = job.get('raw_path', job_id)
                 scan_target_id = wday_raw_path if ats_type == 'workday' else job_id
                 detail_url_override = job.get('detail_url')
+                title_has_marker = any(marker in title_lower for marker in EXPERIENCE_MARKERS)
                 
-                if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, detail_url_override=detail_url_override):
+                if not check_jd_experience(ats_type, scan_target_id, token_or_subdomain, title_has_marker=title_has_marker, detail_url_override=detail_url_override):
                     continue
                     
                 print(f"🔥 Processing Match Target: {title} at {company_name} ({location})")
